@@ -8,6 +8,13 @@
 cmake_minimum_required(VERSION 3.10..3.31)
 project(nativepg LANGUAGES CXX)
 
+if(DEFINED ENV{EXTRA_CXX_FLAGS})
+    # Split the flags string into a CMake list
+    separate_arguments(EXTRA_CXX_FLAGS_LIST UNIX_COMMAND "$ENV{EXTRA_CXX_FLAGS}")
+endif()
+
+MESSAGE("Using ${CMAKE_CXX_COMPILER_ID} compiler on ${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}...(Extra flags:$ENV{EXTRA_CXX_FLAGS})")
+
 find_package(boost_headers REQUIRED)
 find_package(OpenSSL REQUIRED)
 
@@ -38,9 +45,9 @@ function (add_unit_test TEST_DIR TEST_NAME)
     set(TARGET_NAME "nativepg_${TEST_NAME}")
     add_executable(${TARGET_NAME} test/unit/${TEST_DIR}/${TEST_NAME}.cpp)
     target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(${TARGET_NAME} PRIVATE nativepg nativepg_test_utils)
+    target_link_libraries(${TARGET_NAME} PRIVATE nativepg_test_utils)
     add_test(NAME ${TARGET_NAME} COMMAND ${TARGET_NAME})
-    target_compile_options(${TARGET_NAME} PUBLIC -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(${TARGET_NAME} PUBLIC -Wall -Wextra -Wpedantic -Werror ${EXTRA_CXX_FLAGS_LIST})
 endfunction()
 
 enable_testing()
