@@ -329,6 +329,8 @@ public:
 template <class... Args>
 response(Args&&...) -> response<std::decay_t<Args>...>;
 
+inline response ignore_response{ignore};
+
 }  // namespace nativepg
 
 #endif
