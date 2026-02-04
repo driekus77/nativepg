@@ -13,6 +13,10 @@
 #include <charconv>
 #include <cstdint>
 #include <span>
+#include <chrono>
+#include <iostream>
+#include <locale>
+#include <sstream>
 
 #include "nativepg/client_errc.hpp"
 #include "nativepg/detail/field_traits.hpp"
@@ -45,6 +49,26 @@ error_code parse_binary_int(std::span<const unsigned char> from, T& to)
         return client_errc::protocol_value_error;
     to = boost::endian::endian_load<T, sizeof(T), boost::endian::order::big>(from.data());
     return {};
+}
+
+template <class T = std::chrono::sys_time<std::chrono::milliseconds>>
+ error_code parse_text_time(std::span<const unsigned char> from, T& to)
+{
+    const auto str = std::string(reinterpret_cast<const char*>(from.data()), from.size());
+    auto ss = std::stringstream(str);
+
+    std::chrono::milliseconds ms;
+
+    if (!std::chrono::from_stream(ss, "%T", ms))
+    {
+        return make_error_code(client_errc::incompatible_field_type);
+    }
+
+
+    auto res = std::chrono::sys_time<std::chrono::milliseconds>{ms};
+    to = std::move(res);
+
+    return error_code();
 }
 
 }  // namespace
@@ -121,6 +145,20 @@ boost::system::error_code detail::field_parse<std::int64_t>::call(
         default: BOOST_ASSERT(false); return {};
     }
 }
+
+boost::system::error_code detail::field_parse<std::chrono::sys_time<std::chrono::milliseconds>>::call(
+    std::optional<std::span<const unsigned char>> from,
+    const protocol::field_description& desc,
+    std::chrono::sys_time<std::chrono::milliseconds>& to
+)
+{
+    if (!from.has_value())
+        return client_errc::unexpected_null;
+    BOOST_ASSERT(desc.type_oid == 1083);
+    return desc.fmt_code == protocol::format_code::text ? parse_text_time(*from, to)
+        : parse_text_time(*from, to);
+}
+
 
 boost::system::error_code detail::compute_pos_map(
     const protocol::row_description& meta,
