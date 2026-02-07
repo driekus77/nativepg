@@ -31,21 +31,72 @@
 namespace asio = boost::asio;
 using namespace nativepg;
 
-struct empty {};
-BOOST_DESCRIBE_STRUCT(empty, (), ())
-
-struct myrow
+struct time_row
 {
-    std::int64_t    id;
-    std::string     name;
     std::chrono::microseconds t;
 };
-BOOST_DESCRIBE_STRUCT(myrow, (), (id, name, t))
+BOOST_DESCRIBE_STRUCT(time_row, (), (t))
 
 static void print_err(const char* prefix, const extended_error& err)
 {
     std::cout << prefix << err.code.what() << ": " << err.diag.message() << '\n';
 }
+
+static asio::awaitable<void> test_text_format_time_parsing(connection& conn)
+{
+    // Start timing this method
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Compose our request
+    request req;
+    req.add_query("SELECT TIME '12:32:06.342156' as t", {});
+
+    // Structures to parse the response into
+    std::vector<time_row> select_vec;
+    response res{into(select_vec)};
+
+    auto [err] = co_await conn.async_exec(req, res, asio::as_tuple);
+
+    // Finish timing this method
+    auto finish = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finish - start);
+
+    // Print results
+    if (err.extended_error::code != boost::system::errc::success)
+        std::cerr << "Operation with text format results in Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
+    else
+        std::cout << "Operation with text format select result: " << std::format("{0:%T}", select_vec[0].t) << " (in " << duration << ")" << std::endl;
+}
+
+
+static asio::awaitable<void> test_binary_format_time_parsing(connection& conn)
+{
+    // Start timing this operation
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Compose our request
+    statement<std::chrono::microseconds> stmt{"bintest"};
+    request req;
+    req.add_prepare("SELECT $1::text::time as t", {"bintest"} )
+        .add_execute("bintest", {"12:34:23.43535"}, request::param_format::text, protocol::format_code::binary, 1);
+
+    // Structures to parse the response into
+    std::vector<time_row> time_vec;
+    response res{into(time_vec)};
+
+    auto [err] = co_await conn.async_exec(req, res, asio::as_tuple);
+
+    // Finish timing this method
+    auto finish = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finish - start);
+
+    // Print results
+    if (err.extended_error::code != boost::system::errc::success)
+        std::cerr << "Operation with binary format results in Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
+    else
+        std::cout << "Operation with binary format select result: " << std::format("{0:%T}", time_vec[0].t) << " (in " << duration << ")" << std::endl;
+}
+
 
 static asio::awaitable<void> co_main()
 {
@@ -58,35 +109,9 @@ static asio::awaitable<void> co_main()
     );
     std::cout << "Startup complete\n";
 
-    // Compose our request
-    request req;
-    req.add_query("CREATE TABLE IF NOT EXISTS mdtt ( id bigserial primary key, name text not null, t time )", {});
-    req.add_query("INSERT INTO  mdtt (name, t) VALUES ('birthday', now())", {});
-    req.add_query("SELECT id, name, t FROM mdtt WHERE name = 'birthday'", {});
-    req.add_query("DROP TABLE IF EXISTS mdtt", {});
+    co_await test_text_format_time_parsing(conn);
 
-    // Structures to parse the response into
-    std::vector<empty> ignore_;
-    std::vector<myrow> select_vec;
-    response res{
-        into(ignore_),
-        into(ignore_),
-        into(select_vec),
-        into(ignore_)
-    };
-
-    auto [err] = co_await conn.async_exec(req, res, asio::as_tuple);
-    if (err.code != boost::system::errc::success)
-    {
-        print_err("Operation result: ", err);
-    }
-    else
-    {
-        for (auto& row : select_vec)
-        {
-            std::cout << "Select result: " << std::format("{0:%T}", row.t) << std::endl;
-        }
-    }
+    co_await test_binary_format_time_parsing(conn);
 
     std::cout << "Done\n";
 }

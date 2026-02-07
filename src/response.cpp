@@ -111,28 +111,48 @@ constexpr error_code parse_text_time(std::span<const unsigned char> from, T& to)
     else
         pos += 2;
 
-    // Validate and Skip .
-    if (*pos != '.')
-        return client_errc::protocol_value_error;
-    else
-        pos++;
+    int us = 0;
+    // fraction part is optional
+    if ((last - pos) > 1 )
+    {
+        // Validate and Skip .
+        if (*pos != '.')
+            return client_errc::protocol_value_error;
+        else
+            pos++;
 
-    // Parse rest as fraction (Optional)
-    int fraction = 0;
-    err = std::from_chars(pos, last, fraction);
-    if (err.ec != std::errc{})
-        return std::make_error_code(err.ec);
-    int n = last - pos; // number of digits
+        // Parse rest as fraction (Optional)
+        int fraction = 0;
+        err = std::from_chars(pos, last, fraction);
+        if (err.ec != std::errc{})
+            return std::make_error_code(err.ec);
+        int n = last - pos; // number of digits
 
-    // Scale fraction to microseconds without std::pow
-    //int us = fraction * std::pow(10, 6 - n); // scale to µs
-    int scale = 1'000'000;
-    for (int i = 0; i < n; ++i) scale /= 10;
-    int us = fraction * scale;
+        // Scale fraction to microseconds with std::pow
+        us = fraction * std::pow(10, 6 - n); // scale to µs
+        /*// Scale faster without std::pow
+        int scale = 1000000;
+        for (int i = 0; i < n; ++i) scale /= 10;
+        us = fraction * scale;
+        */
+    }
 
     to = std::chrono::hours{hours} + std::chrono::minutes{minutes} + std::chrono::seconds{seconds} + std::chrono::microseconds{us};
 
-    return error_code();
+    return error_code{};
+}
+
+/*
+ * time binary is in microseconds big-endian int64
+ */
+template <class T = std::chrono::microseconds>
+constexpr error_code parse_binary_time(std::span<const unsigned char> from, T& to) noexcept
+{
+    auto us = boost::endian::endian_load<int64_t, sizeof(int64_t), boost::endian::order::big>(from.data());
+
+    to = std::chrono::microseconds{us};
+
+    return error_code{};
 }
 
 }  // namespace
@@ -219,8 +239,9 @@ boost::system::error_code detail::field_parse<std::chrono::microseconds>::call(
     if (!from.has_value())
         return client_errc::unexpected_null;
     BOOST_ASSERT(desc.type_oid == 1083);
-    return desc.fmt_code == protocol::format_code::text ? parse_text_time(*from, to)
-        : parse_text_time(*from, to);
+    return desc.fmt_code == protocol::format_code::text ?
+        parse_text_time(*from, to) :
+        parse_binary_time(*from, to);
 }
 
 
@@ -290,6 +311,7 @@ handler_setup_result detail::resultset_setup(const request& req, std::size_t off
         switch (*it)
         {
             // Ignore parse, bind and flush messages
+            case request_message_type::sync: continue;
             case request_message_type::flush:
             case request_message_type::parse:
             case request_message_type::bind: continue;
