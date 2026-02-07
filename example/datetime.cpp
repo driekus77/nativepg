@@ -38,7 +38,7 @@ struct myrow
 {
     std::int64_t    id;
     std::string     name;
-    std::chrono::sys_time<std::chrono::milliseconds> t;
+    std::chrono::microseconds t;
 };
 BOOST_DESCRIBE_STRUCT(myrow, (), (id, name, t))
 

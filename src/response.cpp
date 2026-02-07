@@ -51,22 +51,86 @@ error_code parse_binary_int(std::span<const unsigned char> from, T& to)
     return {};
 }
 
-template <class T = std::chrono::sys_time<std::chrono::milliseconds>>
- error_code parse_text_time(std::span<const unsigned char> from, T& to)
+/*
+ * Output format:  HH:MM:SS[.ffffff]
+ *
+ * time type in frontend/backend protocol:
+ * - All in 24H
+ * - No AM/PM
+ * - No Compact notations
+ * - Fractions are optional
+ * - Microseconds precision max.
+ */
+template <class T = std::chrono::microseconds>
+constexpr error_code parse_text_time(std::span<const unsigned char> from, T& to) noexcept
 {
-    const auto str = std::string(reinterpret_cast<const char*>(from.data()), from.size());
-    auto ss = std::stringstream(str);
+    using namespace std::chrono_literals;
 
-    std::chrono::milliseconds ms;
+    if (from.size() < 8)
+        // Postgresql delivers wrong format
+        return client_errc::protocol_value_error;
 
-    if (!std::chrono::from_stream(ss, "%T", ms))
-    {
-        return make_error_code(client_errc::incompatible_field_type);
-    }
+    const char* first = reinterpret_cast<const char*>(from.data());
+    const char* last = first + from.size();
 
+    auto pos = first;
 
-    auto res = std::chrono::sys_time<std::chrono::milliseconds>{ms};
-    to = std::move(res);
+    // Parse HH
+    int hours{};
+    auto err = std::from_chars(pos, pos + 2, hours);
+    if (err.ec != std::errc{})
+        return std::make_error_code(err.ec);
+    else
+        pos += 2;
+
+    // Validate and Skip :
+    if (*pos != ':')
+        return client_errc::protocol_value_error;
+    else
+        pos++;
+
+    // Parse MM
+    int minutes{};
+    err = std::from_chars(pos, pos + 2, minutes);
+    if (err.ec != std::errc{})
+        return std::make_error_code(err.ec);
+    else
+        pos += 2;
+
+    // Validate and Skip :
+    if (*pos != ':')
+        return client_errc::protocol_value_error;
+    else
+        pos++;
+
+    // Parse SS
+    int seconds{};
+    err = std::from_chars(pos, pos + 2, seconds);
+    if (err.ec != std::errc{})
+        return std::make_error_code(err.ec);
+    else
+        pos += 2;
+
+    // Validate and Skip .
+    if (*pos != '.')
+        return client_errc::protocol_value_error;
+    else
+        pos++;
+
+    // Parse rest as fraction (Optional)
+    int fraction = 0;
+    err = std::from_chars(pos, last, fraction);
+    if (err.ec != std::errc{})
+        return std::make_error_code(err.ec);
+    int n = last - pos; // number of digits
+
+    // Scale fraction to microseconds without std::pow
+    //int us = fraction * std::pow(10, 6 - n); // scale to µs
+    int scale = 1'000'000;
+    for (int i = 0; i < n; ++i) scale /= 10;
+    int us = fraction * scale;
+
+    to = std::chrono::hours{hours} + std::chrono::minutes{minutes} + std::chrono::seconds{seconds} + std::chrono::microseconds{us};
 
     return error_code();
 }
@@ -146,10 +210,10 @@ boost::system::error_code detail::field_parse<std::int64_t>::call(
     }
 }
 
-boost::system::error_code detail::field_parse<std::chrono::sys_time<std::chrono::milliseconds>>::call(
+boost::system::error_code detail::field_parse<std::chrono::microseconds>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
-    std::chrono::sys_time<std::chrono::milliseconds>& to
+    std::chrono::microseconds& to
 )
 {
     if (!from.has_value())

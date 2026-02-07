@@ -26,7 +26,7 @@ template <class T>
 struct field_is_compatible;
 
 template <>
-struct field_is_compatible<std::chrono::sys_time<std::chrono::milliseconds>>
+struct field_is_compatible<std::chrono::microseconds>
 {
     static inline boost::system::error_code call(const protocol::field_description& desc)
     {
@@ -39,12 +39,12 @@ template <class T>
 struct field_parse;
 
 template <>
-struct field_parse<std::chrono::sys_time<std::chrono::milliseconds>>
+struct field_parse<std::chrono::microseconds>
 {
     static boost::system::error_code call(
         std::optional<std::span<const unsigned char>> from,
         const protocol::field_description& desc,
-        std::chrono::sys_time<std::chrono::milliseconds>& to
+        std::chrono::microseconds& to
     );
 };
 
