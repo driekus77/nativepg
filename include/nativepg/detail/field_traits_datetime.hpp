@@ -63,6 +63,15 @@ struct field_is_compatible<types::pg_timestamptz>
     }
 };
 
+// INTERVAL
+template <>
+struct field_is_compatible<types::pg_interval>
+{
+    static inline boost::system::error_code call(const protocol::field_description& desc)
+    {
+        return desc.type_oid == 1186 ? boost::system::error_code() : client_errc::incompatible_field_type;
+    }
+};
 
 template <class T>
 struct field_parse;
@@ -121,5 +130,17 @@ struct field_parse<types::pg_timestamptz>
         types::pg_timestamptz& to
     );
 };
+
+// INTERVAL
+template <>
+struct field_parse<types::pg_interval>
+{
+    static boost::system::error_code call(
+        std::optional<std::span<const unsigned char>> from,
+        const protocol::field_description& desc,
+        types::pg_interval& to
+    );
+};
+
 }
 #endif  // NATIVEPG_FIELD_TRAITS_DATETIME_HPP
