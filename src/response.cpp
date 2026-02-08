@@ -52,10 +52,7 @@ error_code parse_binary_int(std::span<const unsigned char> from, T& to)
     return {};
 }
 
-/* DATE => std::chrono::sys_days. (TEXT)
- *
- * date type in frontend/backend protocol:
- */
+// DATE => std::chrono::sys_days. (TEXT)
 template <class T = std::chrono::sys_days>
 constexpr error_code parse_text_date(std::span<const unsigned char> from, T& to) noexcept
 {
@@ -211,7 +208,7 @@ constexpr error_code parse_binary_time(std::span<const unsigned char> from, T& t
 
 
 // TIMETZ => pg_timetz (TEXT)
-template <class T = detail::pg_timetz>
+template <class T = types::pg_timetz>
 constexpr error_code parse_text_timetz(std::span<const unsigned char> from, T& to) noexcept
 {
     if (from.size() < 11)
@@ -309,7 +306,7 @@ constexpr error_code parse_text_timetz(std::span<const unsigned char> from, T& t
 }
 
 // TIMETZ => pg_timetz (BINARY)
-template <class T = detail::pg_timetz>
+template <class T = types::pg_timetz>
 constexpr error_code parse_binary_timetz(std::span<const unsigned char> from, T& to) noexcept
 {
     if (from.size() != 12) // 8 + 4 bytes
@@ -331,6 +328,105 @@ constexpr error_code parse_binary_timetz(std::span<const unsigned char> from, T&
     to.utc_offset = std::chrono::seconds{-offset_west_s};
 
     return error_code{};
+}
+
+// TIMESTAMP => pg_timestamp / std::chrono::local_time<microseconds> (TEXT)
+template <class T = types::pg_timestamp>
+constexpr error_code parse_text_timestamp(std::span<const unsigned char> from, T& to) noexcept
+{
+    if (from.size() < 19) // minimum: YYYY-MM-DD HH:MM:SS
+        return client_errc::protocol_value_error;
+
+    // Parse date part using the function above
+    std::chrono::sys_days date;
+    auto ec = parse_text_date(from.subspan(0, 10), date);
+    if (ec) return ec;
+
+    // Parse time part (reuse existing time parser)
+    std::chrono::microseconds tod;
+    ec = parse_text_time(from.subspan(11), tod);
+    if (ec) return ec;
+
+    to = T{date.time_since_epoch() + tod};
+    return {};
+}
+
+// TIMESTAMP => pg_timestamp (BINARY)
+template <class T = types::pg_timestamp>
+constexpr error_code parse_binary_timestamp(
+    std::span<const unsigned char> from, T& to) noexcept
+{
+    if (from.size() != 8)
+        return client_errc::protocol_value_error;
+
+    // Load big-endian int64: microseconds since 2000-01-01
+    std::int64_t us_since_2000 =
+        boost::endian::endian_load<std::int64_t, 8, boost::endian::order::big>(
+            from.data());
+
+    // PostgreSQL epoch
+    constexpr std::chrono::sys_days pg_epoch{
+        std::chrono::year{2000}/1/1
+    };
+
+    // Cast sys_days → microseconds duration
+    auto us_since_epoch = std::chrono::time_point_cast<std::chrono::microseconds>(pg_epoch)
+                          .time_since_epoch()
+                        + std::chrono::microseconds{us_since_2000};
+
+    to = T{us_since_epoch};
+
+    return {};
+}
+
+// TIMESTAMPTZ => pg_timestamptz (TEXT)
+template <class T = types::pg_timestamptz>
+constexpr error_code parse_text_timestamptz(std::span<const unsigned char> from, T& to) noexcept
+{
+    if (from.size() < 19) // minimum: YYYY-MM-DD HH:MM:SS
+        return client_errc::protocol_value_error;
+
+    // Parse date part using the function above
+    std::chrono::sys_days date;
+    auto ec = parse_text_date(from.subspan(0, 10), date);
+    if (ec) return ec;
+
+    // Parse time part (reuse existing time parser)
+    types::pg_timetz ts;
+    ec = parse_text_timetz(from.subspan(11), ts);
+    if (ec) return ec;
+
+    to = T{date.time_since_epoch() + ts.time_since_midnight};
+
+    return {};
+}
+
+// TIMESTAMPTZ => pg_timestamp (BINARY)
+template <class T = types::pg_timestamptz>
+constexpr error_code parse_binary_timestamptz(
+    std::span<const unsigned char> from, T& to) noexcept
+{
+    if (from.size() != 8)
+        return client_errc::protocol_value_error;
+
+    // Load big-endian int64: microseconds since 2000-01-01
+    std::int64_t us_since_2000 =
+        boost::endian::endian_load<std::int64_t, 8, boost::endian::order::big>(
+            from.data());
+
+    // PostgreSQL epoch
+    constexpr std::chrono::sys_days pg_epoch{
+        std::chrono::year{2000}/1/1
+    };
+
+    // Cast sys_days → microseconds duration
+    auto us_since_epoch = std::chrono::time_point_cast<std::chrono::microseconds>(pg_epoch)
+                          .time_since_epoch()
+                        + std::chrono::microseconds{us_since_2000};
+
+    to = T{us_since_epoch};
+
+    return {};
 }
 
 }  // namespace
@@ -440,10 +536,10 @@ boost::system::error_code detail::field_parse<std::chrono::microseconds>::call(
 }
 
 // TIMETZ => pg_timetz
-boost::system::error_code detail::field_parse<detail::pg_timetz>::call(
+boost::system::error_code detail::field_parse<types::pg_timetz>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
-    detail::pg_timetz& to
+    types::pg_timetz& to
 )
 {
     if (!from.has_value())
@@ -452,6 +548,36 @@ boost::system::error_code detail::field_parse<detail::pg_timetz>::call(
     return desc.fmt_code == protocol::format_code::text ?
         parse_text_timetz(*from, to) :
         parse_binary_timetz(*from, to);
+}
+
+// TIMESTAMP => pg_timestamp
+boost::system::error_code detail::field_parse<types::pg_timestamp>::call(
+    std::optional<std::span<const unsigned char>> from,
+    const protocol::field_description& desc,
+    types::pg_timestamp& to
+)
+{
+    if (!from.has_value())
+        return client_errc::unexpected_null;
+    BOOST_ASSERT(desc.type_oid == 1114);
+    return desc.fmt_code == protocol::format_code::text ?
+        parse_text_timestamp(*from, to) :
+        parse_binary_timestamp(*from, to);
+}
+
+// TIMESTAMPTZ => pg_timestamptz
+boost::system::error_code detail::field_parse<types::pg_timestamptz>::call(
+    std::optional<std::span<const unsigned char>> from,
+    const protocol::field_description& desc,
+    types::pg_timestamptz& to
+)
+{
+    if (!from.has_value())
+        return client_errc::unexpected_null;
+    BOOST_ASSERT(desc.type_oid == 1184);
+    return desc.fmt_code == protocol::format_code::text ?
+        parse_text_timestamptz(*from, to) :
+        parse_binary_timestamptz(*from, to);
 }
 
 boost::system::error_code detail::compute_pos_map(
