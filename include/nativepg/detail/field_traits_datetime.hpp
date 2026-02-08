@@ -25,6 +25,23 @@ namespace nativepg::detail {
 template <class T>
 struct field_is_compatible;
 
+// Special type for capturing Postgresql timetz in C++20
+struct pg_timetz {
+    std::chrono::microseconds time_since_midnight;
+    std::chrono::seconds utc_offset;
+};
+
+// DATE
+template <>
+struct field_is_compatible<std::chrono::sys_days>
+{
+    static inline boost::system::error_code call(const protocol::field_description& desc)
+    {
+        return desc.type_oid == 1082 ? boost::system::error_code() : client_errc::incompatible_field_type;
+    }
+};
+
+// TIME
 template <>
 struct field_is_compatible<std::chrono::microseconds>
 {
@@ -34,10 +51,32 @@ struct field_is_compatible<std::chrono::microseconds>
     }
 };
 
+// TIMETZ
+template <>
+struct field_is_compatible<pg_timetz>
+{
+    static inline boost::system::error_code call(const protocol::field_description& desc)
+    {
+        return desc.type_oid == 1266 ? boost::system::error_code() : client_errc::incompatible_field_type;
+    }
+};
+
 
 template <class T>
 struct field_parse;
 
+// DATE
+template <>
+struct field_parse<std::chrono::sys_days>
+{
+    static boost::system::error_code call(
+        std::optional<std::span<const unsigned char>> from,
+        const protocol::field_description& desc,
+        std::chrono::sys_days& to
+    );
+};
+
+// TIME
 template <>
 struct field_parse<std::chrono::microseconds>
 {
@@ -45,6 +84,17 @@ struct field_parse<std::chrono::microseconds>
         std::optional<std::span<const unsigned char>> from,
         const protocol::field_description& desc,
         std::chrono::microseconds& to
+    );
+};
+
+// TIMETZ
+template <>
+struct field_parse<pg_timetz>
+{
+    static boost::system::error_code call(
+        std::optional<std::span<const unsigned char>> from,
+        const protocol::field_description& desc,
+        pg_timetz& to
     );
 };
 

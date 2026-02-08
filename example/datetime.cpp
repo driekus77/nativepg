@@ -31,18 +31,80 @@
 namespace asio = boost::asio;
 using namespace nativepg;
 
+struct date_row
+{
+    std::chrono::sys_days d;
+};
+BOOST_DESCRIBE_STRUCT(date_row, (), (d))
+
 struct time_row
 {
     std::chrono::microseconds t;
 };
 BOOST_DESCRIBE_STRUCT(time_row, (), (t))
 
-static void print_err(const char* prefix, const extended_error& err)
+struct timetz_row
 {
-    std::cout << prefix << err.code.what() << ": " << err.diag.message() << '\n';
+    detail::pg_timetz tz;
+};
+BOOST_DESCRIBE_STRUCT(timetz_row, (), (tz))
+
+// DATE to std::chrono::days
+static asio::awaitable<void> date_text_example(connection& conn)
+{
+    // Start timing this operation
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Compose our request
+    request req;
+    req.add_query("SELECT DATE '1977-06-21' as d", {});
+
+    // Structures to parse the response into
+    std::vector<date_row> select_vec;
+    response res{into(select_vec)};
+
+    auto [err] = co_await conn.async_exec(req, res, asio::as_tuple);
+
+    // Finish timing this method
+    auto finish = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finish - start);
+
+    // Print results
+    if (err.extended_error::code != boost::system::errc::success)
+        std::cerr << "DATE TEXT operation results in Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
+    else
+        std::cout << "DATE TEXT select result: " << std::format("{0:%F}", select_vec[0].d) << " (in " << duration << ")" << std::endl;
 }
 
-static asio::awaitable<void> test_text_format_time_parsing(connection& conn)
+static asio::awaitable<void> date_binary_example(connection& conn)
+{
+    // Start timing this operation
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Compose our request
+    request req;
+    req.add_prepare("SELECT $1::text::date as d", {"date_bintest"} )
+        .add_execute("date_bintest", {"1977-06-21"}, request::param_format::text, protocol::format_code::binary, 1);
+
+    // Structures to parse the response into
+    std::vector<date_row> select_vec;
+    response res{into(select_vec)};
+
+    auto [err] = co_await conn.async_exec(req, res, asio::as_tuple);
+
+    // Finish timing this method
+    auto finish = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finish - start);
+
+    // Print results
+    if (err.extended_error::code != boost::system::errc::success)
+        std::cerr << "DATE BINARY Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
+    else
+        std::cout << "DATE BINARY select result: " << std::format("{0}", select_vec[0].d) << " (in " << duration << ")" << std::endl;
+}
+
+// TIME to std::chrono::microseconds
+static asio::awaitable<void> time_text_example(connection& conn)
 {
     // Start timing this method
     auto start = std::chrono::high_resolution_clock::now();
@@ -63,19 +125,17 @@ static asio::awaitable<void> test_text_format_time_parsing(connection& conn)
 
     // Print results
     if (err.extended_error::code != boost::system::errc::success)
-        std::cerr << "Operation with text format results in Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
+        std::cerr << "TIME TEXT operation results in Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
     else
-        std::cout << "Operation with text format select result: " << std::format("{0:%T}", select_vec[0].t) << " (in " << duration << ")" << std::endl;
+        std::cout << "TIME TEXT select result: " << std::format("{0:%T}", select_vec[0].t) << " (in " << duration << ")" << std::endl;
 }
 
-
-static asio::awaitable<void> test_binary_format_time_parsing(connection& conn)
+static asio::awaitable<void> time_binary_example(connection& conn)
 {
     // Start timing this operation
     auto start = std::chrono::high_resolution_clock::now();
 
     // Compose our request
-    statement<std::chrono::microseconds> stmt{"bintest"};
     request req;
     req.add_prepare("SELECT $1::text::time as t", {"bintest"} )
         .add_execute("bintest", {"12:34:23.43535"}, request::param_format::text, protocol::format_code::binary, 1);
@@ -92,9 +152,66 @@ static asio::awaitable<void> test_binary_format_time_parsing(connection& conn)
 
     // Print results
     if (err.extended_error::code != boost::system::errc::success)
-        std::cerr << "Operation with binary format results in Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
+        std::cerr << "TIME BINARY Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
     else
-        std::cout << "Operation with binary format select result: " << std::format("{0:%T}", time_vec[0].t) << " (in " << duration << ")" << std::endl;
+        std::cout << "TIME BINARY select result: " << std::format("{0:%T}", time_vec[0].t) << " (in " << duration << ")" << std::endl;
+}
+
+
+// TIME to pg_timetz
+static asio::awaitable<void> timetz_text_example(connection& conn)
+{
+    // Start timing this operation
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Compose our request
+    request req;
+    req.add_query("SELECT TIMETZ '12:32:06.3421+01:00' as tz", {});
+
+    // Structures to parse the response into
+    std::vector<timetz_row> select_vec;
+    response res{into(select_vec)};
+
+    auto [err] = co_await conn.async_exec(req, res, asio::as_tuple);
+
+    // Finish timing this method
+    auto finish = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finish - start);
+
+    // Print results
+    if (err.extended_error::code != boost::system::errc::success)
+        std::cerr << "TIMETZ TEXT results in Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
+    else
+        std::cout << "TIMETZ TEXT select result: " << std::format("{0:%T}", select_vec[0].tz.time_since_midnight) << "+"
+                    << std::format("{:%T}", select_vec[0].tz.utc_offset) << " (in " << duration << ")" << std::endl;
+}
+
+static asio::awaitable<void> timetz_binary_example(connection& conn)
+{
+    // Start timing this operation
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Compose our request
+    request req;
+    req.add_prepare("SELECT $1::text::timetz as tz", {"timetz_bintest"} )
+        .add_execute("timetz_bintest", {"12:34:23.43535+05:00"}, request::param_format::text, protocol::format_code::binary, 1);
+
+    // Structures to parse the response into
+    std::vector<timetz_row> select_vec;
+    response res{into(select_vec)};
+
+    auto [err] = co_await conn.async_exec(req, res, asio::as_tuple);
+
+    // Finish timing this method
+    auto finish = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finish - start);
+
+    // Print results
+    if (err.extended_error::code != boost::system::errc::success)
+        std::cerr << "TIMETZ BINARY Error: " << err.code.what() << ": " << err.diag.message() << " (in " << duration << ")" << std::endl;
+    else
+        std::cout << "TIMETZ BINARY select result: " << std::format("{:%T}", select_vec[0].tz.time_since_midnight)
+                    << (select_vec[0].tz.utc_offset.count() > 0 ? "+"  : "") << std::format("{:%T}", select_vec[0].tz.utc_offset) << " (in " << duration << ")" << std::endl;
 }
 
 
@@ -109,9 +226,15 @@ static asio::awaitable<void> co_main()
     );
     std::cout << "Startup complete\n";
 
-    co_await test_text_format_time_parsing(conn);
+    co_await date_text_example(conn);
+    co_await date_binary_example(conn);
 
-    co_await test_binary_format_time_parsing(conn);
+    co_await time_text_example(conn);
+    co_await time_binary_example(conn);
+
+    co_await timetz_text_example(conn);
+    co_await timetz_binary_example(conn);
+
 
     std::cout << "Done\n";
 }
