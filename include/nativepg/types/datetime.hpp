@@ -5,7 +5,15 @@
 #include <boost/endian/conversion.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <charconv>
 #include <chrono>
+#include <cctype>
+#include <cstring>
+#include <span>
+#include <string_view>
+#include <system_error>
+
+#include "nativepg/client_errc.hpp"
 
 namespace nativepg::types {
 
@@ -44,53 +52,276 @@ struct pg_interval {
     std::chrono::microseconds time;
 };
 
+namespace detail {
+
+inline std::string_view trim(std::string_view sv)
+{
+    while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front())))
+        sv.remove_prefix(1);
+    while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back())))
+        sv.remove_suffix(1);
+    return sv;
+}
+
+inline bool iequals(std::string_view a, std::string_view b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+    {
+        auto ca = static_cast<unsigned char>(a[i]);
+        auto cb = static_cast<unsigned char>(b[i]);
+        if (std::tolower(ca) != std::tolower(cb))
+            return false;
+    }
+    return true;
+}
+
+inline bool consume_bc(std::string_view& sv)
+{
+    sv = trim(sv);
+    if (sv.size() < 2)
+        return false;
+    std::string_view tail = sv.substr(sv.size() - 2);
+    if (!iequals(tail, "BC"))
+        return false;
+    sv.remove_suffix(2);
+    sv = trim(sv);
+    return true;
+}
+
+template <class T>
+inline bool parse_infinity(std::string_view sv, T& to)
+{
+    sv = trim(sv);
+    if (iequals(sv, "infinity"))
+    {
+        to = T::max();
+        return true;
+    }
+    if (iequals(sv, "-infinity"))
+    {
+        to = T::min();
+        return true;
+    }
+    return false;
+}
+
+inline error_code parse_date_parts(std::string_view sv, int& year, int& month, int& day) noexcept
+{
+    sv = trim(sv);
+    if (sv.empty())
+        return client_errc::protocol_value_error;
+
+    const char* first = sv.data();
+    const char* last = first + sv.size();
+    const char* pos = first;
+
+    auto res = std::from_chars(pos, last, year);
+    if (res.ec != std::errc{})
+        return std::make_error_code(res.ec);
+    pos = res.ptr;
+    if (pos >= last || *pos != '-')
+        return client_errc::protocol_value_error;
+    ++pos;
+
+    res = std::from_chars(pos, last, month);
+    if (res.ec != std::errc{})
+        return std::make_error_code(res.ec);
+    pos = res.ptr;
+    if (pos >= last || *pos != '-')
+        return client_errc::protocol_value_error;
+    ++pos;
+
+    res = std::from_chars(pos, last, day);
+    if (res.ec != std::errc{})
+        return std::make_error_code(res.ec);
+    pos = res.ptr;
+    if (pos != last)
+        return client_errc::protocol_value_error;
+
+    return {};
+}
+
+inline error_code parse_time_prefix(
+    std::string_view sv,
+    std::size_t& pos,
+    std::chrono::microseconds& out
+) noexcept
+{
+    const char* first = sv.data();
+    const char* last = first + sv.size();
+    const char* p = first + pos;
+
+    int hours{};
+    auto res = std::from_chars(p, last, hours);
+    if (res.ec != std::errc{})
+        return std::make_error_code(res.ec);
+    p = res.ptr;
+    if (p >= last || *p != ':')
+        return client_errc::protocol_value_error;
+    ++p;
+
+    int minutes{};
+    res = std::from_chars(p, last, minutes);
+    if (res.ec != std::errc{})
+        return std::make_error_code(res.ec);
+    p = res.ptr;
+    if (p >= last || *p != ':')
+        return client_errc::protocol_value_error;
+    ++p;
+
+    int seconds{};
+    res = std::from_chars(p, last, seconds);
+    if (res.ec != std::errc{})
+        return std::make_error_code(res.ec);
+    p = res.ptr;
+
+    int us = 0;
+    if (p < last && *p == '.')
+    {
+        ++p;
+        const char* start = p;
+        while (p < last && std::isdigit(static_cast<unsigned char>(*p)))
+            ++p;
+        if (start == p)
+            return client_errc::protocol_value_error;
+        int fraction = 0;
+        res = std::from_chars(start, p, fraction);
+        if (res.ec != std::errc{})
+            return std::make_error_code(res.ec);
+        int n = p - start;
+        if (n > 6) {
+            for (int i = 0; i < n - 6; ++i) fraction /= 10;
+        } else {
+            for (int i = 0; i < 6 - n; ++i) fraction *= 10;
+        }
+        us = fraction;
+    }
+
+    if (hours < 0 || minutes < 0 || seconds < 0)
+        return client_errc::protocol_value_error;
+    if (minutes > 59 || seconds > 59)
+        return client_errc::protocol_value_error;
+    if (hours > 24)
+        return client_errc::protocol_value_error;
+    if (hours == 24 && (minutes != 0 || seconds != 0 || us != 0))
+        return client_errc::protocol_value_error;
+
+    out = std::chrono::hours{hours} + std::chrono::minutes{minutes} +
+          std::chrono::seconds{seconds} + std::chrono::microseconds{us};
+    pos = static_cast<std::size_t>(p - first);
+    return {};
+}
+
+inline error_code parse_tz_suffix(
+    std::string_view sv,
+    std::size_t pos,
+    std::chrono::seconds& offset
+) noexcept
+{
+    sv = trim(sv.substr(pos));
+    if (sv.empty())
+    {
+        offset = std::chrono::seconds{0};
+        return {};
+    }
+
+    if (iequals(sv, "Z") || iequals(sv, "UTC") || iequals(sv, "UT") || iequals(sv, "GMT"))
+    {
+        offset = std::chrono::seconds{0};
+        return {};
+    }
+
+    const char* p = sv.data();
+    const char* last = p + sv.size();
+    if (*p != '+' && *p != '-')
+        return client_errc::protocol_value_error;
+    int sign = *p == '+' ? 1 : -1;
+    ++p;
+
+    int hours = 0;
+    int minutes = 0;
+    int digits = 0;
+    while (p < last && std::isdigit(static_cast<unsigned char>(*p)) && digits < 2)
+    {
+        hours = hours * 10 + (*p - '0');
+        ++p;
+        ++digits;
+    }
+    if (digits == 0)
+        return client_errc::protocol_value_error;
+
+    if (p == last)
+    {
+        minutes = 0;
+    }
+    else if (*p == ':')
+    {
+        ++p;
+        if (last - p < 2)
+            return client_errc::protocol_value_error;
+        if (!std::isdigit(static_cast<unsigned char>(p[0])) ||
+            !std::isdigit(static_cast<unsigned char>(p[1])))
+            return client_errc::protocol_value_error;
+        minutes = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2;
+    }
+    else if (std::isdigit(static_cast<unsigned char>(*p)))
+    {
+        // HHMM format
+        if (last - p != 2)
+            return client_errc::protocol_value_error;
+        if (!std::isdigit(static_cast<unsigned char>(p[0])) ||
+            !std::isdigit(static_cast<unsigned char>(p[1])))
+            return client_errc::protocol_value_error;
+        minutes = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2;
+    }
+    else
+    {
+        return client_errc::protocol_value_error;
+    }
+
+    if (p != last)
+        return client_errc::protocol_value_error;
+    if (hours < 0 || hours > 15 || minutes < 0 || minutes > 59)
+        return client_errc::protocol_value_error;
+
+    offset = (std::chrono::hours{hours} + std::chrono::minutes{minutes}) * sign;
+    return {};
+}
+
+}  // namespace detail
+
 
 
 // DATE => std::chrono::sys_days. (TEXT)
 template <class T = std::chrono::sys_days>
 constexpr error_code parse_text_date(std::span<const unsigned char> from, T& to) noexcept
 {
-    if (from.size() != 10)
-        return client_errc::protocol_value_error;
+    std::string_view sv{reinterpret_cast<const char*>(from.data()), from.size()};
+    if (detail::parse_infinity(sv, to))
+        return {};
 
-    const char* first = reinterpret_cast<const char*>(from.data());
-    const char* pos = first;
-
+    bool bc = detail::consume_bc(sv);
     int year{}, month{}, day{};
+    auto ec = detail::parse_date_parts(sv, year, month, day);
+    if (ec)
+        return ec;
 
-    // Parse YYYY
-    auto res = std::from_chars(pos, pos + 4, year);
-    if (res.ec != std::errc{}) return std::make_error_code(res.ec);
-    pos += 4;
+    if (bc)
+        year = 1 - year;
 
-    if (*pos != '-')
-        return client_errc::protocol_value_error;
-    ++pos;
-
-    // Parse MM
-    res = std::from_chars(pos, pos + 2, month);
-    if (res.ec != std::errc{}) return std::make_error_code(res.ec);
-    pos += 2;
-
-    if (*pos != '-')
-        return client_errc::protocol_value_error;
-    ++pos;
-
-    // Parse DD
-    res = std::from_chars(pos, pos + 2, day);
-    if (res.ec != std::errc{}) return std::make_error_code(res.ec);
-
-    // Specify year, month, day
     std::chrono::year y{year};
     std::chrono::month m{static_cast<unsigned>(month)};
     std::chrono::day d{static_cast<unsigned>(day)};
-
-    // Compose year_month_day
     std::chrono::year_month_day ymd{y, m, d};
+    if (!ymd.ok())
+        return client_errc::protocol_value_error;
 
     to = std::chrono::sys_days{ymd};
-
-    return error_code{};
+    return {};
 }
 
 // DATE => std::chrono::sys_days. (BINARY)
@@ -117,74 +348,26 @@ constexpr error_code parse_text_time(std::span<const unsigned char> from, T& to)
 {
     if (from.empty())
         return client_errc::protocol_value_error;
-
-    const char* first = reinterpret_cast<const char*>(from.data());
-    const char* last = first + from.size();
-
-    auto pos = first;
-
-    // Parse HH
-    int hours{};
-    auto err = std::from_chars(pos, last, hours);
-    if (err.ec != std::errc{})
-        return std::make_error_code(err.ec);
-    pos = err.ptr;
-
-    // Validate and Skip :
-    if (pos >= last || *pos != ':')
+    std::string_view sv{reinterpret_cast<const char*>(from.data()), from.size()};
+    sv = detail::trim(sv);
+    std::size_t pos = 0;
+    std::chrono::microseconds out;
+    auto ec = detail::parse_time_prefix(sv, pos, out);
+    if (ec)
+        return ec;
+    if (detail::trim(sv.substr(pos)).size() != 0)
         return client_errc::protocol_value_error;
-    pos++;
-
-    // Parse MM
-    int minutes{};
-    err = std::from_chars(pos, last, minutes);
-    if (err.ec != std::errc{})
-        return std::make_error_code(err.ec);
-    pos = err.ptr;
-
-    // Validate and Skip :
-    if (pos >= last || *pos != ':')
-        return client_errc::protocol_value_error;
-    pos++;
-
-    // Parse SS
-    int seconds{};
-    err = std::from_chars(pos, last, seconds);
-    if (err.ec != std::errc{})
-        return std::make_error_code(err.ec);
-    pos = err.ptr;
-
-    int us = 0;
-    // fraction part is optional
-    if (pos < last && *pos == '.')
-    {
-        pos++;
-        const char* start = pos;
-        int fraction = 0;
-        err = std::from_chars(pos, last, fraction);
-        if (err.ec != std::errc{})
-            return std::make_error_code(err.ec);
-        int n = err.ptr - start; // number of digits
-        pos = err.ptr;
-
-        // Scale
-        if (n > 6) {
-            for (int i = 0; i < n - 6; ++i) fraction /= 10;
-        } else {
-            for (int i = 0; i < 6 - n; ++i) fraction *= 10;
-        }
-        us = fraction;
-    }
-
-    to = std::chrono::hours{hours} + std::chrono::minutes{minutes} + std::chrono::seconds{seconds} + std::chrono::microseconds{us};
-
-    return error_code{};
+    to = out;
+    return {};
 }
 
 // TIME => std::chrono::microseconds (BINARY).
 template <class T = std::chrono::microseconds>
 constexpr error_code parse_binary_time(std::span<const unsigned char> from, T& to) noexcept
 {
+    if (from.size() != 8)
+        return client_errc::protocol_value_error;
+
     auto us = boost::endian::endian_load<int64_t, sizeof(int64_t), boost::endian::order::big>(from.data());
 
     to = std::chrono::microseconds{us};
@@ -198,98 +381,21 @@ constexpr error_code parse_binary_time(std::span<const unsigned char> from, T& t
 template <class T = types::pg_timetz>
 constexpr error_code parse_text_timetz(std::span<const unsigned char> from, T& to) noexcept
 {
-    if (from.size() < 11)
-        return client_errc::protocol_value_error;
+    std::string_view sv{reinterpret_cast<const char*>(from.data()), from.size()};
+    sv = detail::trim(sv);
+    std::size_t pos = 0;
+    std::chrono::microseconds time_of_day;
+    auto ec = detail::parse_time_prefix(sv, pos, time_of_day);
+    if (ec)
+        return ec;
 
-    const char* first = reinterpret_cast<const char*>(from.data());
-    const char* last = first + from.size();
-    const char* dot = static_cast<const char*>(std::memchr(first, '.', from.size()));
-    const char* sign = static_cast<const char*>(std::memchr(first, '+', from.size()));
-    if (!sign)
-        sign = static_cast<const char*>(std::memchr(first, '-', from.size()));
-    const char* pos = first;
-
-    // --- Parse HH ---
-    int hours{};
-    auto err = std::from_chars(pos, pos + 2, hours);
-    if (err.ec != std::errc{}) return std::make_error_code(err.ec);
-    pos += 2;
-
-    if (*pos != ':') return client_errc::protocol_value_error;
-    ++pos;
-
-    // --- Parse MM ---
-    int minutes{};
-    err = std::from_chars(pos, pos + 2, minutes);
-    if (err.ec != std::errc{}) return std::make_error_code(err.ec);
-    pos += 2;
-
-    if (*pos != ':') return client_errc::protocol_value_error;
-    ++pos;
-
-    // --- Parse SS ---
-    int seconds{};
-    err = std::from_chars(pos, pos + 2, seconds);
-    if (err.ec != std::errc{}) return std::make_error_code(err.ec);
-    pos += 2;
-
-    // --- Parse fractional seconds (optional) ---
-    int us = 0;
-    if (dot && *pos == '.') {
-        ++pos; // skip '.'
-
-        const char* fraction_end = sign ? sign : last + 1;
-        int fraction = 0;
-        err = std::from_chars(pos, fraction_end, fraction);
-        if (err.ec != std::errc{}) return std::make_error_code(err.ec);
-
-        int n = fraction_end - pos;
-        int scale = 1000000;
-        for (int i = 0; i < n; ++i) scale /= 10;
-        us = fraction * scale;
-
-        pos += n;
-    }
-
-    // --- Parse UTC offset (±HH:MM) if present ---
     std::chrono::seconds offset{0};
-    if (pos < last && sign) {
-        if (*pos != '+' && *pos != '-') return client_errc::protocol_value_error;
+    ec = detail::parse_tz_suffix(sv, pos, offset);
+    if (ec)
+        return ec;
 
-        // skip sign
-        int sign_factor = *sign == '+' ? 1 : -1;
-        ++pos;
-
-        // Parse HH
-        int offset_h{};
-        err = std::from_chars(pos, pos + 2, offset_h);
-        if (err.ec != std::errc{}) return std::make_error_code(err.ec);
-        pos += 2;
-
-        // Parse MM
-        int offset_m{};
-        if (pos < last)
-        {
-            if (*pos != ':') return client_errc::protocol_value_error;
-            ++pos;
-
-            err = std::from_chars(pos, pos + 2, offset_m);
-            if (err.ec != std::errc{}) return std::make_error_code(err.ec);
-            pos += 2;
-        }
-
-        offset = std::chrono::hours{offset_h} + std::chrono::minutes{offset_m};
-        offset *= sign_factor;
-    }
-
-    // --- Fill struct ---
-    to = T{
-        std::chrono::hours{hours} + std::chrono::minutes{minutes} +
-        std::chrono::seconds{seconds} + std::chrono::microseconds{us},
-        offset
-    };
-
-    return error_code{};
+    to = T{time_of_day, offset};
+    return {};
 }
 
 // TIMETZ => pg_timetz (BINARY)
@@ -321,20 +427,42 @@ constexpr error_code parse_binary_timetz(std::span<const unsigned char> from, T&
 template <class T = types::pg_timestamp>
 constexpr error_code parse_text_timestamp(std::span<const unsigned char> from, T& to) noexcept
 {
-    if (from.size() < 19) // minimum: YYYY-MM-DD HH:MM:SS
+    std::string_view sv{reinterpret_cast<const char*>(from.data()), from.size()};
+    if (detail::parse_infinity(sv, to))
+        return {};
+
+    bool bc = detail::consume_bc(sv);
+    sv = detail::trim(sv);
+    auto sep = sv.find_first_of(" T");
+    if (sep == std::string_view::npos)
         return client_errc::protocol_value_error;
 
-    // Parse date part using the function above
-    std::chrono::sys_days date;
-    auto ec = parse_text_date(from.subspan(0, 10), date);
-    if (ec) return ec;
+    std::string_view date_sv = sv.substr(0, sep);
+    std::string_view time_sv = detail::trim(sv.substr(sep + 1));
 
-    // Parse time part (reuse existing time parser)
+    int year{}, month{}, day{};
+    auto ec = detail::parse_date_parts(date_sv, year, month, day);
+    if (ec)
+        return ec;
+    if (bc)
+        year = 1 - year;
+
+    std::chrono::year y{year};
+    std::chrono::month m{static_cast<unsigned>(month)};
+    std::chrono::day d{static_cast<unsigned>(day)};
+    std::chrono::year_month_day ymd{y, m, d};
+    if (!ymd.ok())
+        return client_errc::protocol_value_error;
+
+    std::size_t pos = 0;
     std::chrono::microseconds tod;
-    ec = parse_text_time(from.subspan(11), tod);
-    if (ec) return ec;
+    ec = detail::parse_time_prefix(time_sv, pos, tod);
+    if (ec)
+        return ec;
+    if (detail::trim(time_sv.substr(pos)).size() != 0)
+        return client_errc::protocol_value_error;
 
-    to = T{date.time_since_epoch() + tod};
+    to = T{std::chrono::sys_days{ymd}.time_since_epoch() + tod};
     return {};
 }
 
@@ -370,21 +498,46 @@ constexpr error_code parse_binary_timestamp(
 template <class T = types::pg_timestamptz>
 constexpr error_code parse_text_timestamptz(std::span<const unsigned char> from, T& to) noexcept
 {
-    if (from.size() < 19) // minimum: YYYY-MM-DD HH:MM:SS
+    std::string_view sv{reinterpret_cast<const char*>(from.data()), from.size()};
+    if (detail::parse_infinity(sv, to))
+        return {};
+
+    bool bc = detail::consume_bc(sv);
+    sv = detail::trim(sv);
+    auto sep = sv.find_first_of(" T");
+    if (sep == std::string_view::npos)
         return client_errc::protocol_value_error;
 
-    // Parse date part using the function above
-    std::chrono::sys_days date;
-    auto ec = parse_text_date(from.subspan(0, 10), date);
-    if (ec) return ec;
+    std::string_view date_sv = sv.substr(0, sep);
+    std::string_view time_sv = detail::trim(sv.substr(sep + 1));
 
-    // Parse time part (reuse existing time parser)
-    types::pg_timetz ts;
-    ec = parse_text_timetz(from.subspan(11), ts);
-    if (ec) return ec;
+    int year{}, month{}, day{};
+    auto ec = detail::parse_date_parts(date_sv, year, month, day);
+    if (ec)
+        return ec;
+    if (bc)
+        year = 1 - year;
 
-    to = T{date.time_since_epoch() + ts.time_since_midnight};
+    std::chrono::year y{year};
+    std::chrono::month m{static_cast<unsigned>(month)};
+    std::chrono::day d{static_cast<unsigned>(day)};
+    std::chrono::year_month_day ymd{y, m, d};
+    if (!ymd.ok())
+        return client_errc::protocol_value_error;
 
+    std::size_t pos = 0;
+    std::chrono::microseconds tod;
+    ec = detail::parse_time_prefix(time_sv, pos, tod);
+    if (ec)
+        return ec;
+
+    std::chrono::seconds offset{0};
+    ec = detail::parse_tz_suffix(time_sv, pos, offset);
+    if (ec)
+        return ec;
+
+    to = T{std::chrono::sys_days{ymd}.time_since_epoch() + tod -
+           std::chrono::duration_cast<std::chrono::microseconds>(offset)};
     return {};
 }
 
@@ -461,13 +614,17 @@ constexpr error_code parse_text_interval(std::span<const unsigned char> from, T&
 
         if (part.find(':') != std::string_view::npos) {
             int sign = 1;
-            if (sv[pos] == '-') { sign = -1; ++pos; }
-            else if (sv[pos] == '+') { ++pos; }
+            bool has_sign = false;
+            if (sv[pos] == '-') { sign = -1; ++pos; has_sign = true; }
+            else if (sv[pos] == '+') { ++pos; has_sign = true; }
 
             microseconds time_part;
             // The time part is what remains in 'part' after potentially skipping the sign
-            size_t sign_offset = (sv[pos-1] == '-' || sv[pos-1] == '+') ? 1 : 0;
-            auto ec = parse_text_time(std::span{reinterpret_cast<const unsigned char*>(sv.data() + pos), part.size() - sign_offset}, time_part);
+            size_t sign_offset = has_sign ? 1 : 0;
+            auto ec = parse_text_time(
+                std::span{reinterpret_cast<const unsigned char*>(sv.data() + pos), part.size() - sign_offset},
+                time_part
+            );
             if (ec) return ec;
 
             to.time += time_part * sign;

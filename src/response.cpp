@@ -57,7 +57,7 @@ error_code parse_binary_int(std::span<const unsigned char> from, T& to)
 
 }  // namespace
 
-boost::system::error_code detail::field_parse<std::int16_t>::call(
+boost::system::error_code nativepg::detail::field_parse<std::int16_t>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     std::int16_t& to
@@ -70,7 +70,7 @@ boost::system::error_code detail::field_parse<std::int16_t>::call(
                                                         : parse_binary_int(*from, to);
 }
 
-boost::system::error_code detail::field_parse<std::int32_t>::call(
+boost::system::error_code nativepg::detail::field_parse<std::int32_t>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     std::int32_t& to
@@ -96,7 +96,7 @@ boost::system::error_code detail::field_parse<std::int32_t>::call(
     }
 }
 
-boost::system::error_code detail::field_parse<std::int64_t>::call(
+boost::system::error_code nativepg::detail::field_parse<std::int64_t>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     std::int64_t& to
@@ -132,7 +132,7 @@ boost::system::error_code detail::field_parse<std::int64_t>::call(
 
 
 // DATE => std::chrono::sys_days
-boost::system::error_code detail::field_parse<std::chrono::sys_days>::call(
+boost::system::error_code nativepg::detail::field_parse<std::chrono::sys_days>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     std::chrono::sys_days& to
@@ -147,7 +147,7 @@ boost::system::error_code detail::field_parse<std::chrono::sys_days>::call(
 }
 
 // TIME => std::chrono::microseconds
-boost::system::error_code detail::field_parse<std::chrono::microseconds>::call(
+boost::system::error_code nativepg::detail::field_parse<std::chrono::microseconds>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     std::chrono::microseconds& to
@@ -162,7 +162,7 @@ boost::system::error_code detail::field_parse<std::chrono::microseconds>::call(
 }
 
 // TIMETZ => pg_timetz
-boost::system::error_code detail::field_parse<types::pg_timetz>::call(
+boost::system::error_code nativepg::detail::field_parse<types::pg_timetz>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     types::pg_timetz& to
@@ -177,7 +177,7 @@ boost::system::error_code detail::field_parse<types::pg_timetz>::call(
 }
 
 // TIMESTAMP => pg_timestamp
-boost::system::error_code detail::field_parse<types::pg_timestamp>::call(
+boost::system::error_code nativepg::detail::field_parse<types::pg_timestamp>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     types::pg_timestamp& to
@@ -192,7 +192,7 @@ boost::system::error_code detail::field_parse<types::pg_timestamp>::call(
 }
 
 // TIMESTAMPTZ => pg_timestamptz
-boost::system::error_code detail::field_parse<types::pg_timestamptz>::call(
+boost::system::error_code nativepg::detail::field_parse<types::pg_timestamptz>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     types::pg_timestamptz& to
@@ -207,7 +207,7 @@ boost::system::error_code detail::field_parse<types::pg_timestamptz>::call(
 }
 
 // INTERVAL => pg_interval
-boost::system::error_code detail::field_parse<types::pg_interval>::call(
+boost::system::error_code nativepg::detail::field_parse<types::pg_interval>::call(
     std::optional<std::span<const unsigned char>> from,
     const protocol::field_description& desc,
     types::pg_interval& to
@@ -221,7 +221,7 @@ boost::system::error_code detail::field_parse<types::pg_interval>::call(
         parse_binary_interval(*from, to);
 }
 
-boost::system::error_code detail::compute_pos_map(
+boost::system::error_code nativepg::detail::compute_pos_map(
     const protocol::row_description& meta,
     std::span<const std::string_view> name_table,
     std::span<pos_map_entry> output
@@ -258,7 +258,7 @@ boost::system::error_code detail::compute_pos_map(
     return {};
 }
 
-handler_setup_result detail::resultset_setup(const request& req, std::size_t offset)
+handler_setup_result nativepg::detail::resultset_setup(const request& req, std::size_t offset)
 {
     const auto msgs = req.messages().subspan(offset);
     bool describe_found = false, execute_found = false;
