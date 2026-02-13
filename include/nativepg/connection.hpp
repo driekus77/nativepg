@@ -12,6 +12,7 @@
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/compose.hpp>
 #include <boost/asio/connect.hpp>
+#include <boost/asio/consign.hpp>
 #include <boost/asio/deferred.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/write.hpp>
@@ -174,7 +175,7 @@ public:
             detail::exec_op{
                 *impl_,
                 protocol::detail::exec_fsm{req, handler}
-        },
+            },
             token,
             impl_->sock
         );
@@ -187,7 +188,7 @@ public:
         return boost::asio::async_compose<CompletionToken, void(extended_error)>(
             detail::exec_op{
                 *impl_,
-                protocol::detail::exec_fsm{req, ignore_response}
+                protocol::detail::exec_fsm{req, eo_response}
         },
             token,
             impl_->sock

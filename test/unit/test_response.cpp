@@ -108,10 +108,10 @@ void test_deduction_guide()
 
 void test_ignore_resultset()
 {
-    using h1 = ignore_handler;
+    using h1 = errors_only_handler;
     using h2 = mock_handler<2>;
 
-    response res{ignore, h2{}};
+    response res{eo, h2{}};
 
     static_assert(std::is_same_v<decltype(res), response<h1, h2>>);
 }

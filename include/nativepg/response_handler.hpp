@@ -121,15 +121,7 @@ public:
 };
 
 
-struct ignore_handler
-{
-    extended_error err;
-    handler_setup_result setup(const request& req, std::size_t) { return {req.messages().size()}; }
-    void on_message(const any_request_message&, std::size_t) {}
-    const extended_error& result() const { return err; }
-};
 
-const ignore_handler ignore{};
 
 }  // namespace nativepg
 

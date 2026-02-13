@@ -71,14 +71,20 @@ static asio::awaitable<void> co_main()
     else
         std::cout << "Created successfully\n";
 
-    // Insert
+    // Insert (one request per insert to keep a single resultset per async_exec)
     const int inserts = 15;
-    request insert_req;
+    extended_error insert_err;
     for (int i = 0; i < inserts; ++i)
     {
+        request insert_req;
         insert_req.add_query("INSERT INTO cisdd (name, postal_code) VALUES ('Ernie', $1); ", {i});
+        auto [err] = co_await conn.async_exec(insert_req, asio::as_tuple);
+        if (err.code)
+        {
+            insert_err = err;
+            break;
+        }
     }
-    auto [insert_err] = co_await conn.async_exec(insert_req, asio::as_tuple);
     if (insert_err.code)
         print_err("Insert result: ", insert_err);
     else
